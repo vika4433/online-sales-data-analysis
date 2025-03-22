@@ -170,19 +170,73 @@ def group_statistics(df, group_by, metrics, aggregations=None):
             print(f"Column '{col}' not found in the dataframe")
             return None
     
-    # Default aggregations if none provided
+    # Filter metrics into numeric and non-numeric
+    numeric_metrics = []
+    non_numeric_metrics = []
+    for metric in metrics:
+        if pd.api.types.is_numeric_dtype(df[metric]):
+            numeric_metrics.append(metric)
+        else:
+            non_numeric_metrics.append(metric)
+    
+    # Create separate aggregation dictionaries for numeric and non-numeric columns
+    numeric_aggs = {}
+    non_numeric_aggs = {}
+    
+    # If no custom aggregations provided, use defaults
     if aggregations is None:
-        aggregations = {}
-        for metric in metrics:
-            if pd.api.types.is_numeric_dtype(df[metric]):
-                aggregations[metric] = ['count', 'sum', 'mean', 'median', 'min', 'max', 'std']
-            else:
-                aggregations[metric] = ['count', 'nunique']
+        for metric in numeric_metrics:
+            numeric_aggs[metric] = ['count', 'sum', 'mean', 'median', 'min', 'max', 'std']
+        for metric in non_numeric_metrics:
+            non_numeric_aggs[metric] = ['count', 'nunique']
+    else:
+        # Use provided aggregations but ensure they're appropriate for column types
+        for metric, aggs in aggregations.items():
+            if metric in numeric_metrics:
+                numeric_aggs[metric] = aggs
+            elif metric in non_numeric_metrics:
+                # Filter out numeric aggregations for non-numeric columns
+                safe_aggs = [agg for agg in aggs if agg in ['count', 'nunique']]
+                if safe_aggs:
+                    non_numeric_aggs[metric] = safe_aggs
+                else:
+                    non_numeric_aggs[metric] = ['count']
     
-    # Calculate grouped statistics
-    grouped_stats = df.groupby(group_by).agg(aggregations)
+    # Process numeric and non-numeric columns separately and then combine results
+    results = []
     
-    return grouped_stats
+    # Process numeric columns
+    if numeric_aggs:
+        try:
+            numeric_stats = df.groupby(group_by).agg(numeric_aggs)
+            results.append(numeric_stats)
+        except Exception as e:
+            print(f"Error processing numeric columns: {e}")
+    
+    # Process non-numeric columns
+    if non_numeric_aggs:
+        try:
+            non_numeric_stats = df.groupby(group_by).agg(non_numeric_aggs)
+            results.append(non_numeric_stats)
+        except Exception as e:
+            print(f"Error processing non-numeric columns: {e}")
+    
+    # If we have results, combine them
+    if results:
+        try:
+            # Combine the results (this will align on the index)
+            combined_stats = pd.concat(results, axis=1)
+            return combined_stats
+        except Exception as e:
+            print(f"Error combining results: {e}")
+            # Return the first result if we can't combine
+            return results[0] if results else None
+    else:
+        # Fallback to a simple count if everything else failed
+        try:
+            return df.groupby(group_by).size().to_frame('count')
+        except:
+            return None
 
 def test_significance(df, group_column, value_column, test_type='t-test'):
     """
@@ -204,55 +258,63 @@ def test_significance(df, group_column, value_column, test_type='t-test'):
     dict
         Dictionary containing test results
     """
-    if df is None or df.empty or group_column not in df.columns or value_column not in df.columns:
-        return None
+    if df is None or df.empty:
+        return {'error': 'Empty dataframe'}
+    
+    if group_column not in df.columns:
+        return {'error': f"Group column '{group_column}' not found"}
+    
+    if value_column not in df.columns:
+        return {'error': f"Value column '{value_column}' not found"}
+    
+    # Check if value column is numeric
+    if not pd.api.types.is_numeric_dtype(df[value_column]):
+        return {'error': f"Value column '{value_column}' must be numeric for significance testing"}
     
     # Get unique groups
     groups = df[group_column].unique()
     
+    # Need at least 2 groups for comparison
     if len(groups) < 2:
-        return {"error": "Need at least two groups for comparison"}
+        return {'error': f"Need at least 2 groups for comparison, found {len(groups)}"}
     
-    results = {"test_type": test_type, "groups": list(groups)}
+    # Perform t-test (for 2 groups)
+    if test_type == 't-test':
+        if len(groups) != 2:
+            return {'error': f"t-test requires exactly 2 groups, found {len(groups)}"}
+        
+        group1_data = df[df[group_column] == groups[0]][value_column].dropna()
+        group2_data = df[df[group_column] == groups[1]][value_column].dropna()
+        
+        if len(group1_data) < 2 or len(group2_data) < 2:
+            return {'error': "Insufficient data in groups for t-test"}
+        
+        t_stat, p_value = stats.ttest_ind(group1_data, group2_data, equal_var=False)
+        
+        return {
+            'groups': groups,
+            't_statistic': t_stat,
+            'p_value': p_value,
+            'significant': p_value < 0.05
+        }
     
-    try:
-        if test_type == 't-test' and len(groups) == 2:
-            # Perform t-test for two groups
-            group1 = df[df[group_column] == groups[0]][value_column].dropna()
-            group2 = df[df[group_column] == groups[1]][value_column].dropna()
-            
-            t_stat, p_value = stats.ttest_ind(group1, group2, equal_var=False)
-            results.update({
-                "t_statistic": t_stat,
-                "p_value": p_value,
-                "significant": p_value < 0.05
-            })
-            
-        elif test_type == 'anova':
-            # Perform ANOVA for multiple groups
-            group_data = [df[df[group_column] == group][value_column].dropna() for group in groups]
-            f_stat, p_value = stats.f_oneway(*group_data)
-            results.update({
-                "f_statistic": f_stat,
-                "p_value": p_value,
-                "significant": p_value < 0.05
-            })
-            
-        elif test_type == 'chi2' and pd.api.types.is_categorical_dtype(df[value_column]) or df[value_column].nunique() < 10:
-            # Perform Chi-square test for categorical data
-            contingency_table = pd.crosstab(df[group_column], df[value_column])
-            chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
-            results.update({
-                "chi2_statistic": chi2,
-                "p_value": p_value,
-                "degrees_of_freedom": dof,
-                "significant": p_value < 0.05
-            })
-            
-        else:
-            results["error"] = f"Invalid test type '{test_type}' or incompatible with data"
-            
-    except Exception as e:
-        results["error"] = str(e)
+    # Perform ANOVA (for 3+ groups)
+    elif test_type == 'anova':
+        group_data = [df[df[group_column] == group][value_column].dropna() for group in groups]
+        
+        # Check if we have enough data in each group
+        if any(len(data) < 2 for data in group_data):
+            return {'error': "Insufficient data in one or more groups for ANOVA"}
+        
+        f_stat, p_value = stats.f_oneway(*group_data)
+        
+        return {
+            'groups': groups,
+            'f_statistic': f_stat,
+            'p_value': p_value,
+            'significant': p_value < 0.05
+        }
     
-    return results
+    # Unsupported test type
+    else:
+        return {'error': f"Unsupported test type: {test_type}"}

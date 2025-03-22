@@ -202,7 +202,7 @@ if df_raw is not None:
         # Create a dataframe with column info
         col_info = pd.DataFrame({
             'Column': df.columns,
-            'Data Type': [df[col].dtype for col in df.columns],
+            'Data Type': [str(df[col].dtype) for col in df.columns],  # Convert dtype to string
             'Non-Null Count': [df[col].count() for col in df.columns],
             'Null Count': [df[col].isnull().sum() for col in df.columns],
             'Unique Values': [df[col].nunique() for col in df.columns]
@@ -264,21 +264,61 @@ if df_raw is not None:
             # Select grouping column
             group_cols = st.multiselect(
                 "Select columns to group by",
-                options=categorical_cols,
-                default=list(categorical_cols[:1]) if len(categorical_cols) > 0 else []
+                options=df.select_dtypes(include=['object']).columns,
+                default=list(df.select_dtypes(include=['object']).columns[:1]) if len(df.select_dtypes(include=['object']).columns) > 0 else []
             )
             
             if group_cols:
-                # Select metrics for grouping
+                # Select metrics for grouping - show all columns as options but with info
+                all_cols = list(df.columns)
                 metric_cols = st.multiselect(
                     "Select metrics to aggregate",
-                    options=numeric_cols,
+                    options=all_cols,
                     default=list(numeric_cols[:2]) if len(numeric_cols) > 1 else list(numeric_cols[:1])
                 )
                 
                 if metric_cols:
+                    # Separate numeric and non-numeric columns
+                    selected_numeric = [col for col in metric_cols if pd.api.types.is_numeric_dtype(df[col])]
+                    selected_non_numeric = [col for col in metric_cols if not pd.api.types.is_numeric_dtype(df[col])]
+                    
+                    # Show info about aggregations
+                    if selected_numeric:
+                        st.info(f"Numeric columns ({', '.join(selected_numeric)}) will be aggregated with count, sum, mean, median, min, max, and std")
+                    
+                    if selected_non_numeric:
+                        st.info(f"Non-numeric columns ({', '.join(selected_non_numeric)}) will only be aggregated with count and unique count")
+                    
+                    # Get group statistics
                     group_stats = sa.group_statistics(df, group_cols, metric_cols)
-                    st.dataframe(group_stats, use_container_width=True)
+                    
+                    if group_stats is not None:
+                        # Convert the MultiIndex columns to strings to avoid display issues
+                        if isinstance(group_stats.columns, pd.MultiIndex):
+                            # Create new column names by joining the levels with underscore
+                            new_cols = []
+                            for col in group_stats.columns:
+                                if isinstance(col, tuple):
+                                    # Convert any non-string elements to strings
+                                    col_elements = [str(x) for x in col]
+                                    new_cols.append('_'.join(col_elements))
+                                else:
+                                    new_cols.append(str(col))
+                            
+                            # Create a new DataFrame with the string column names
+                            flat_stats = pd.DataFrame(
+                                group_stats.values, 
+                                index=group_stats.index, 
+                                columns=new_cols
+                            )
+                            
+                            # Display the flattened DataFrame
+                            st.dataframe(flat_stats, use_container_width=True)
+                        else:
+                            # If it's not a MultiIndex, display as is
+                            st.dataframe(group_stats, use_container_width=True)
+                    else:
+                        st.error("Unable to compute group statistics. Please check your column selections.")
                     
                     # Statistical significance tests
                     if len(group_cols) == 1 and df[group_cols[0]].nunique() >= 2:
@@ -328,7 +368,7 @@ if df_raw is not None:
             
             # Select columns for bar chart
             x_col = st.selectbox("Select X-axis column", options=df.columns)
-            y_col = st.selectbox("Select Y-axis column", options=numeric_cols)
+            y_col = st.selectbox("Select Y-axis column", options=df.select_dtypes(include=['float64', 'int64']).columns)
             color_col = st.selectbox("Select color column (optional)", options=['None'] + list(df.columns))
             orientation = st.radio("Orientation", options=["Vertical", "Horizontal"], horizontal=True)
             
@@ -348,7 +388,7 @@ if df_raw is not None:
             st.markdown("### Histogram")
             
             # Select column for histogram
-            hist_col = st.selectbox("Select column", options=numeric_cols)
+            hist_col = st.selectbox("Select column", options=df.select_dtypes(include=['float64', 'int64']).columns)
             bins = st.slider("Number of bins", min_value=5, max_value=100, value=20)
             
             if hist_col:
@@ -365,10 +405,10 @@ if df_raw is not None:
             st.markdown("### Scatter Plot")
             
             # Select columns for scatter plot
-            x_col = st.selectbox("Select X-axis column", options=numeric_cols)
-            y_col = st.selectbox("Select Y-axis column", options=[col for col in numeric_cols if col != x_col])
+            x_col = st.selectbox("Select X-axis column", options=df.select_dtypes(include=['float64', 'int64']).columns)
+            y_col = st.selectbox("Select Y-axis column", options=[col for col in df.select_dtypes(include=['float64', 'int64']).columns if col != x_col])
             color_col = st.selectbox("Select color column (optional)", options=['None'] + list(df.columns))
-            size_col = st.selectbox("Select size column (optional)", options=['None'] + list(numeric_cols))
+            size_col = st.selectbox("Select size column (optional)", options=['None'] + list(df.select_dtypes(include=['float64', 'int64']).columns))
             
             if x_col and y_col:
                 # Create scatter plot
@@ -386,8 +426,8 @@ if df_raw is not None:
             st.markdown("### Pie Chart")
             
             # Select columns for pie chart
-            names_col = st.selectbox("Select category column", options=categorical_cols)
-            values_col = st.selectbox("Select values column", options=numeric_cols)
+            names_col = st.selectbox("Select category column", options=df.select_dtypes(include=['object']).columns)
+            values_col = st.selectbox("Select values column", options=df.select_dtypes(include=['float64', 'int64']).columns)
             hole = st.slider("Donut hole size", min_value=0.0, max_value=0.8, value=0.4, step=0.1)
             
             if names_col and values_col:
@@ -408,9 +448,9 @@ if df_raw is not None:
             st.markdown("### Box Plot")
             
             # Select columns for box plot
-            x_col = st.selectbox("Select category column", options=['None'] + list(categorical_cols))
-            y_col = st.selectbox("Select values column", options=numeric_cols)
-            color_col = st.selectbox("Select color column (optional)", options=['None'] + list(categorical_cols))
+            x_col = st.selectbox("Select category column", options=['None'] + list(df.select_dtypes(include=['object']).columns))
+            y_col = st.selectbox("Select values column", options=df.select_dtypes(include=['float64', 'int64']).columns)
+            color_col = st.selectbox("Select color column (optional)", options=['None'] + list(df.select_dtypes(include=['object']).columns))
             
             if y_col:
                 # Create box plot
@@ -432,7 +472,7 @@ if df_raw is not None:
             # Select column for time series analysis
             ts_col = st.selectbox(
                 "Select column for time series analysis",
-                options=numeric_cols
+                options=df.select_dtypes(include=['float64', 'int64']).columns
             )
             
             # Select frequency for resampling
@@ -501,14 +541,14 @@ if df_raw is not None:
                 st.markdown(f"• Data spans from <span class='highlight'>{date_range}</span>.", unsafe_allow_html=True)
             
             # Top categories insight
-            for cat_col in categorical_cols:
+            for cat_col in df.select_dtypes(include=['object']).columns:
                 if df[cat_col].nunique() < 20:  # Only for columns with reasonable number of categories
                     top_cats = df[cat_col].value_counts().head(3)
                     cats_str = ", ".join([f"{cat} ({count})" for cat, count in top_cats.items()])
                     st.markdown(f"• Top {cat_col}: <span class='highlight'>{cats_str}</span>", unsafe_allow_html=True)
             
             # Numeric column insights
-            for num_col in numeric_cols[:3]:  # Limit to first 3 numeric columns
+            for num_col in df.select_dtypes(include=['float64', 'int64']).columns[:3]:  # Limit to first 3 numeric columns
                 avg_val = df[num_col].mean()
                 max_val = df[num_col].max()
                 
@@ -526,8 +566,8 @@ if df_raw is not None:
                 st.markdown(f"• Average {num_col}: <span class='highlight'>{avg_str}</span>, Maximum: <span class='highlight'>{max_str}</span>", unsafe_allow_html=True)
             
             # Correlation insights
-            if len(numeric_cols) >= 2:
-                corr_matrix = df[numeric_cols].corr()
+            if len(df.select_dtypes(include=['float64', 'int64']).columns) >= 2:
+                corr_matrix = df.select_dtypes(include=['float64', 'int64']).corr()
                 
                 # Find highest correlation (excluding self-correlations)
                 np.fill_diagonal(corr_matrix.values, 0)
@@ -538,11 +578,11 @@ if df_raw is not None:
                 st.markdown(f"• Strongest correlation: <span class='highlight'>{max_corr_idx[0]}</span> and <span class='highlight'>{max_corr_idx[1]}</span> have a {corr_direction} correlation of <span class='highlight'>{max_corr_val:.2f}</span>", unsafe_allow_html=True)
             
             # Time-based insights
-            if 'Date' in df.columns and pd.api.types.is_datetime64_dtype(df['Date']) and len(numeric_cols) > 0:
+            if 'Date' in df.columns and pd.api.types.is_datetime64_dtype(df['Date']) and len(df.select_dtypes(include=['float64', 'int64']).columns) > 0:
                 # Find column with highest growth
                 growth_insights = []
                 
-                for col in numeric_cols[:3]:  # Limit to first 3 numeric columns
+                for col in df.select_dtypes(include=['float64', 'int64']).columns[:3]:  # Limit to first 3 numeric columns
                     monthly_data = df.groupby(pd.Grouper(key='Date', freq='M'))[col].sum()
                     
                     if len(monthly_data) >= 2:
@@ -626,4 +666,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("© 2025 Interactive Data Analysis Application | Created with Streamlit")
+st.markdown(" 2025 Interactive Data Analysis Application | Created with Streamlit")
